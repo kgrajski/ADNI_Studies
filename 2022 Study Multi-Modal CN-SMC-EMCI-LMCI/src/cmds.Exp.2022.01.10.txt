@@ -1,0 +1,1696 @@
+##
+##	Exp.2021.12.02
+##	02Dec2021
+##
+
+##
+##  Requirement: Start in the Exp directory (e.g., exp0).
+##
+
+set RUN_DIR = /adni3/
+set EXP_NAME = exp0
+set WORKS_DIR = $EXP_NAME
+
+set ANCHOR_EXTENSION = 6mm
+set ATLAS_REG = MNI_avg152T1
+set BLUR = 4
+set EPI_DIR = $RUN_DIR/data/rsfmri/
+set GLOBAL_MASK_DIR = $RUN_DIR/$WORKS_DIR/masks/global_mask
+set IMAGE_LIST_FILE = $RUN_DIR/$WORKS_DIR/post_dcm2niix_schedule.txt
+set MOTION_LIMIT = 0.3
+set ROI_SRAD = 6
+set SCRIPT_DIR = $RUN_DIR/dev-adni3
+set FSLAB_DIR = $RUN_DIR/data/fsres
+set FMRI_DIR = $RUN_DIR/data/rsfmri
+
+set CDT = 3.086
+set CEXTENT_DIFF = 10
+set F_STAT_MIN_CLUSTER_SIZE = $CEXTENT_DIFF
+set MIN_CLUSTER_SIZE = 33
+set OVERLAP_THRESH = 17
+set RMM = 1.01
+set ROI_SRAD = 6
+set ROI_SRAD_5mm = 5
+set ROI_SRAD_6mm = 6
+
+set OVERLAP_THRESH = 27
+
+cd $RUN_DIR/$WORKS_DIR
+
+echo $RUN_DIR $EXP_NAME $WORKS_DIR $ANCHOR_EXTENSION $ATLAS_REG $BLUR
+echo $EPI_DIR $GLOBAL_MASK_DIR $IMAGE_LIST_FILE $MOTION_LIMIT
+echo $SCRIPT_DIR
+
+# Tidbits
+#whereami -show_atlas_all |& tee > rm.txt
+
+		#################################################################
+		#
+		#	PRE-PROCESSING STEP 3 - PLAIN (DROP First 10)
+		#
+		#################################################################
+
+cp $SCRIPT_DIR/batchControl.PRE.Step.3.FS.txt batchControl.PRE.Step.3.FS.txt
+#cp $SCRIPT_DIR/setUpPreProcChecks setUpPreProcChecks
+#cp $SCRIPT_DIR/batchControl.ROI.MaskOnly batchControl.ROI.MaskOnly
+#cp $SCRIPT_DIR/batchControl.ROI batchControl.ROI
+#cp $SCRIPT_DIR/batchControl.3danova batchControl.3danova
+#cp $SCRIPT_DIR/batchControl.Confirm.ROIFiles.Present.txt batchControl.Confirm.ROIFiles.Present.txt
+#cp $SCRIPT_DIR/gatherTimeCourses gatherTimeCourses
+
+    #
+    # Make sure the FreeSurfer environment is set up.
+    #
+setenv FREESURFER_HOME /usr/local/freesurfer
+source $FREESURFER_HOME/SetUpFreeSurfer.csh
+setenv SUBJECTS_DIR /adni3/data/fsres
+echo 'export TERM=xterm-mono' >> ~/.bashrc
+
+    #
+    # Generate the set of batch commands for AFNI processing.
+    #
+rm -f afni_batch.txt
+foreach line ( "`cat $IMAGE_LIST_FILE`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    echo $line > rm.$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX
+    echo -n "tcsh -xef batchControl.PRE.Step.3.FS.txt " >> afni_batch.txt
+    echo -n $ATLAS_REG $BLUR $EPI_DIR $EXP_NAME $FSLAB_DIR rm.$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX " " >> afni_batch.txt
+    echo $MOTION_LIMIT $RUN_DIR $WORKS_DIR ">" rm.output.proc.$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX "&" >> afni_batch.txt
+end
+
+  #
+  # Partition and launch the afni.batch.txt commands.
+  #  This is the AFNI pre-processing stream.
+  #  Split afni_batch and then manually launch.
+  #  For example, afni_batch.aa, afni_batch.ab, etc.
+  #  May have to do offloading of results to S3.
+  #
+split -95 afni_batch.txt afni_batch.
+chmod +x afni_batch.a*
+
+  #
+  # Gather the AFNI ss_review statistics files.
+  # Upload to S3
+  # Run in /adni3/exp0
+  #
+rm -f afni_found.txt afni_notfound.txt
+cat afni_batch.txt | awk -F' ' '{print $9}' | sed -e 's?rm\.??' -e 's?\.? ?g' > afni_expected.txt
+rm -rf afni_ss_review
+mkdir afni_ss_review
+foreach line ( "`cat afni_expected.txt`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    echo $line
+    echo "aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/out.ss_review.$RID.txt afni_ss_review/out.ss_review.$RID.txt" > rm.cmd.txt
+    chmod +x rm.cmd.txt
+    ./rm.cmd.txt
+end
+  #
+  # Switch into ss_reviews and run following making sure that the same file "catted" above is manually set in setUpPreProcChecks
+  #
+foreach line ( "`cat afni_expected.txt`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    if ( -f afni_ss_review/out.ss_review.$RID.txt ) then
+        echo $RID $IMAGE_ID_MPRAGE $IMAGE_ID_MPRAGE $DX >> afni_found.txt
+    else
+        echo $RID $IMAGE_ID_MPRAGE $IMAGE_ID_MPRAGE $DX >> afni_notfound.txt
+    endif
+end
+tcsh -xef setUpPreProcChecks
+
+  #
+  # Gather the FS stats directories.
+  # Run in /adni3/exp0
+  #
+rm -rf fs_stats
+mkdir fs_stats
+foreach line ( "`cat post_fs_afni_schedule.txt`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    echo $line
+    rm -rf fs_stats/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX
+    mkdir fs_stats/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX
+    mkdir fs_stats/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/stats
+    echo "aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/stats /adni3/exp0/fs_stats/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/stats --recursive" > rm.cmd.txt
+    chmod +x rm.cmd.txt
+    ./rm.cmd.txt
+end
+
+  #
+  # Manually run fslProc
+  #
+
+  #
+  # For the Dec 2021 - we got these in an earlier stage.
+  # Need to get the subhippocampal field results.
+  #   To do that need to get 6 files from each of the fslab/mri directories (at least).
+  #
+
+  #
+  # Now run ADNI3.Post.FS.AFNI.Analysis.R interactively in R Studio.
+  #
+
+
+	#
+	#	Generate various and sundry group masks
+	# Run in: $RUN_DIR/$WORKS_DIR
+	#
+cd $RUN_DIR/$WORKS_DIR
+rm -rf Masks
+mkdir Masks
+set BRAIN_MASK_DIR = "$RUN_DIR/$WORKS_DIR/Masks"
+set IMAGE_LIST_FILE = "/adni3/exp0/df_go_11Dec2021_id_list.csv"
+foreach line ( "`cat $IMAGE_LIST_FILE`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    set DXBL = $5
+    echo $RID $IMAGE_ID_MPRAGE $IMAGE_ID_RSFMRI $DX $DXBL
+
+    aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/mask_group+tlrc.HEAD \
+       $RUN_DIR/$WORKS_DIR/Masks/$RID.mask_group+tlrc.HEAD
+       
+    aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/mask_group+tlrc.BRIK.gz \
+       $RUN_DIR/$WORKS_DIR/Masks/$RID.mask_group+tlrc.BRIK.gz
+       
+    aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/errts.$RID.fanaticor+tlrc.HEAD \
+       $RUN_DIR/$WORKS_DIR/Masks/errts.$RID.fanaticor+tlrc.HEAD
+       
+    aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/errts.$RID.fanaticor+tlrc.BRIK \
+       $RUN_DIR/$WORKS_DIR/Masks/errts.$RID.fanaticor+tlrc.BRIK
+
+    foreach FOLLOW_TYPE ( follow_ROI_FSWe+tlrc follow_ROI_FSvent+tlrc follow_ROI_aaseg+tlrc follow_ROI_aeseg+tlrc )
+           
+        aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/$FOLLOW_TYPE.HEAD \
+          $RUN_DIR/$WORKS_DIR/Masks/$RID.$FOLLOW_TYPE.HEAD
+       
+        aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/$FOLLOW_TYPE.BRIK.gz \
+          $RUN_DIR/$WORKS_DIR/Masks/$RID.$FOLLOW_TYPE.BRIK.gz
+
+    end
+
+    cd Masks
+
+    rm -f rm.tmpMask.0+tlrc.HEAD rm.tmpMask.0+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'not(amongst(a,4,5,6,7,8,16,43,44,45,46,47))' -prefix rm.tmpMask.0
+
+    rm -f rm.MNIavg152+tlrc.HEAD rm.MNIavg152+tlrc.BRIK.gz
+    3dresample -master errts.$RID.fanaticor+tlrc -prefix rm.MNIavg152 -inset ~/abin/MNI_avg152T1+tlrc
+
+    rm -f $RID.roiMask+tlrc.HEAD $RID.roiMask+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.0+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask
+    
+    
+
+    rm -f rm.tmpMask.1+tlrc.HEAD rm.tmpMask.1+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'not(amongst(a,16))' -prefix rm.tmpMask.1
+
+    rm -f $RID.roiMask.noBS+tlrc.HEAD $RID.roiMask.noBS+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.1+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.noBS
+    
+    
+    
+    rm -f rm.tmpMask.2+tlrc.HEAD rm.tmpMask.2+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,17)' -prefix rm.tmpMask.2
+
+    rm -f $RID.roiMask.L.HPC+tlrc.HEAD $RID.roiMask.L.HPC+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.2+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.L.HPC
+
+    rm -f rm.tmpMask.3+tlrc.HEAD rm.tmpMask.3+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,53)' -prefix rm.tmpMask.3
+
+    rm -f $RID.roiMask.R.HPC+tlrc.HEAD $RID.roiMask.R.HPC+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.3+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.R.HPC
+    
+    
+    
+    rm -f rm.tmpMask.4+tlrc.HEAD rm.tmpMask.4+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,18)' -prefix rm.tmpMask.4
+
+    rm -f $RID.roiMask.L.AMYG+tlrc.HEAD $RID.roiMask.L.AMYG+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.4+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.L.AMYG
+    
+    rm -f rm.tmpMask.5+tlrc.HEAD rm.tmpMask.5+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,54)' -prefix rm.tmpMask.5
+
+    rm -f $RID.roiMask.R.AMYG+tlrc.HEAD $RID.roiMask.R.AMYG+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.5+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.R.AMYG
+    
+    
+    
+    rm -f rm.tmpMask.6+tlrc.HEAD rm.tmpMask.6+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,10)' -prefix rm.tmpMask.6
+
+    rm -f $RID.roiMask.L.THAL+tlrc.HEAD $RID.roiMask.L.THAL+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.6+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.L.THAL
+    
+    rm -f rm.tmpMask.7+tlrc.HEAD rm.tmpMask.7+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,49)' -prefix rm.tmpMask.7
+
+    rm -f $RID.roiMask.R.THAL+tlrc.HEAD $RID.roiMask.R.THAL+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.7+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.R.THAL
+    
+    
+    
+    rm -f rm.tmpMask.8+tlrc.HEAD rm.tmpMask.8+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,26)' -prefix rm.tmpMask.8
+
+    rm -f $RID.roiMask.L.ACC+tlrc.HEAD $RID.roiMask.L.ACC+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.8+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.L.ACC
+    
+    rm -f rm.tmpMask.9+tlrc.HEAD rm.tmpMask.9+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,58)' -prefix rm.tmpMask.9
+
+    rm -f $RID.roiMask.R.ACC+tlrc.HEAD $RID.roiMask.R.ACC+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.9+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.R.ACC
+    
+    
+    
+    rm -f rm.tmpMask.10+tlrc.HEAD rm.tmpMask.10+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,26)' -prefix rm.tmpMask.10
+
+    rm -f $RID.roiMask.L.SN+tlrc.HEAD $RID.roiMask.L.SN+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.10+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.L.SN
+    
+    rm -f rm.tmpMask.11+tlrc.HEAD rm.tmpMask.11+tlrc.BRIK.gz
+    3dcalc -a $RID.follow_ROI_aeseg+tlrc -expr 'amongst(a,58)' -prefix rm.tmpMask.11
+
+    rm -f $RID.roiMask.R.SN+tlrc.HEAD $RID.roiMask.R.SN+tlrc.BRIK.gz
+    3dcalc -a $RID.mask_group+tlrc -b rm.tmpMask.11+tlrc -c rm.MNIavg152+tlrc -expr 'and(a,b,c)' -prefix $RID.roiMask.R.SN
+    
+    #rm -f errts.$RID.fanaticor+tlrc.HEAD errts.$RID.fanaticor+tlrc.BRIK
+    rm -f rm.MNIavg152+tlrc.HEAD rm.MNIavg152+tlrc.BRIK.gz
+    rm -f rm.tmpMask.*+tlrc.HEAD rm.tmpMask.*+tlrc.BRIK.gz
+
+    cd $RUN_DIR/$WORKS_DIR
+
+end
+
+  #
+  # Inventory how many participants with each time step type
+  #
+cd $RUN_DIR/$WORKS_DIR
+rm -f time_stats.csv
+foreach line ( "`cat $IMAGE_LIST_FILE`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    set DXBL = $5
+    echo $RID $IMAGE_ID_MPRAGE $IMAGE_ID_RSFMRI $DX $DXBL
+    echo -n $RID $IMAGE_ID_MPRAGE $IMAGE_ID_RSFMRI $DX $DXBL >> time_stats.csv
+    3dinfo Masks/errts.$RID.fanaticor+tlrc.HEAD | grep "Number of time steps" | sed -e 's/  / /g' | awk -F' ' '{print " " $6 " " $10}' | sed -e 's/s//' >> time_stats.csv
+end
+
+  #
+  # Go back into ADNI3.Post.FS.AFNI.Analysis.R interactively in R Studio.
+  # Result: df_go_basic_21Dec2021_id_list.csv
+  # Result: df_go_adv_21Dec2021_id_list.csv
+  # Point being that we should handle basic and advanced in parallel at first.
+  #
+  
+  #
+  # At this stage, we bifurcate: basic, adv.
+  # Eventually, we may down-sample adv to basic and combine.
+  #
+  
+  #
+  # Create Masks_basic and Masks_adv
+  # Since the rest of the scripts below assume a single Masks directory,
+  # let's create two: one for basic; and one for adv.
+  #   10-Jan.  Manually inspected L HPC.
+  #
+cd $RUN_DIR/$WORKS_DIR
+rm -rf Masks_basic
+mkdir Masks_basic
+foreach line ( "`cat df_go_basic_22Dec2021_id_list.csv`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    set DXBL = $5
+    echo $RID $IMAGE_ID_MPRAGE $IMAGE_ID_RSFMRI $DX $DXBL
+    cp Masks/$RID.* Masks_basic/.
+end
+
+cd $RUN_DIR/$WORKS_DIR
+rm -rf Masks_adv
+mkdir Masks_adv
+foreach line ( "`cat df_go_adv_22Dec2021_id_list.csv`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    set DXBL = $5
+    echo $RID $IMAGE_ID_MPRAGE $IMAGE_ID_RSFMRI $DX $DXBL
+    cp Masks/$RID.* Masks_adv/.
+end
+
+  #
+  # Form the intersection and sum global masks (3dMean)
+  # Generate the bounding boxes (3dclust) for the subcortical segments
+  #
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_basic Masks_adv )
+    cd $ADNI3_PROTOCOL
+    foreach MASK_TYPE ( roiMask roiMask.noBS roiMask.L.HPC roiMask.R.HPC roiMask.L.AMYG roiMask.R.AMYG \
+                    roiMask.L.THAL roiMask.R.THAL roiMask.L.ACC roiMask.R.ACC roiMask.L.SN roiMask.R.SN )
+      echo $MASK_TYPE
+      set MASK_GROUP_LIST = "`ls *.$MASK_TYPE+tlrc.HEAD`"
+      
+      rm -f groupMask.union.$MASK_TYPE+tlrc.HEAD groupMask.union.$MASK_TYPE+tlrc.BRIK.gz
+      3dMean -mask_union -prefix groupMask.union.$MASK_TYPE $MASK_GROUP_LIST
+
+      rm -f groupMask.sum.$MASK_TYPE+tlrc.HEAD groupMask.sum.$MASK_TYPE+tlrc.BRIK.gz
+      3dMean -sum -prefix groupMask.sum.$MASK_TYPE $MASK_GROUP_LIST
+
+      set bbox = `3dclust -mni -quiet -1Dformat -nosum -1noneg -inmask -dxyz=1 0 10 groupMask.sum.$MASK_TYPE+tlrc | \
+        awk '{print $5 " " $6 " " $7 " " $8 " " $9 " " $10}' `
+      echo $MASK_TYPE $bbox > bbox.$MASK_TYPE.txt
+    end
+    cd $RUN_DIR/$WORKS_DIR
+end
+
+  #
+  # At this stage, need to carefully inspect all the masks to be sure that they
+  # make sense.  Might need to do some "manual" trimming espcially for groupMask.sum.roiMask.
+  #
+  # For example - need to manually trim global_study_mask.
+  # Masks_basic: for y >=20 and z<=-38, set cand_global_study_mask to zero
+  #
+cd $RUN_DIR/$WORKS_DIR/Masks_basic
+rm -f cand_global_study_mask+tlrc.HEAD cand_global_study_mask+tlrc.BRIK.gz
+3dcalc -a groupMask.sum.roiMask+tlrc -expr 'ispositive(a-130)' -prefix cand_global_study_mask
+rm -f global_study_mask+tlrc.HEAD global_study_mask+tlrc.BRIK.gz
+3dmask_tool -input cand_global_study_mask+tlrc -prefix global_study_mask -dilate_input 1 -1
+
+cd $RUN_DIR/$WORKS_DIR/Masks_adv
+rm -f cand_global_study_mask+tlrc.HEAD cand_global_study_mask+tlrc.BRIK.gz
+3dcalc -a groupMask.sum.roiMask+tlrc -expr 'ispositive(a-45)' -prefix cand_global_study_mask
+rm -f global_study_mask+tlrc.HEAD global_study_mask+tlrc.BRIK.gz
+3dmask_tool -input cand_global_study_mask+tlrc -prefix global_study_mask -dilate_input 1 -2
+
+  #
+  # Generate candidate anchor ROI seeds
+  #
+set CDT = 3.086
+set CEXTENT_DIFF = 10
+set F_STAT_MIN_CLUSTER_SIZE = $CEXTENT_DIFF
+set MIN_CLUSTER_SIZE = 33
+set OVERLAP_THRESH = 17
+set RMM = 1.01
+set ROI_SRAD = 6
+set ROI_SRAD_5mm = 5
+set ROI_SRAD_6mm = 6
+
+  #
+  # Create the L and R sub-component masks
+  #
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  cd $ADNI3_PROTOCOL
+  cp $SCRIPT_DIR/MTLSubField.MPM.List.txt MTLSubField.MPM.List.txt
+  foreach line ( "`cat MTLSubField.MPM.List.txt`" )
+
+    set argv = ( $line )
+    set MTL_ANCHOR_NAME = $1
+    set MTL_CODE = $2
+    echo $MTL_ANCHOR_NAME $MTL_CODE
+
+    rm -f rm.L.$MTL_ANCHOR_NAME.mask+tlrc.HEAD rm.L.$MTL_ANCHOR_NAME.mask+tlrc.BRIK.gz
+    set L_EXPRESSION = "and( equals(a,$MTL_CODE), equals(b,2) )"
+    3dcalc -a ~/abin/MNIa_caez_mpm_18+tlrc -b ~/abin/MNIa_caez_lr_18+tlrc \
+                    -expr "$L_EXPRESSION" \
+                    -prefix rm.L.$MTL_ANCHOR_NAME.mask
+
+    set BBOX = ` 3dclust  -mni -quiet -1Dformat -nosum -1noneg -inmask \
+                -dxyz=1 $RMM $CEXTENT_DIFF rm.L.$MTL_ANCHOR_NAME.mask+tlrc | awk '{print $5 " " $6 " " $7 " " $8 " " $9 " " $10}' `
+    echo L.$MTL_ANCHOR_NAME $BBOX > L.$MTL_ANCHOR_NAME.BBOX.txt
+
+    rm -f rm.R.$MTL_ANCHOR_NAME.mask+tlrc.HEAD rm.R.$MTL_ANCHOR_NAME.mask+tlrc.BRIK.gz
+    set R_EXPRESSION = "and( equals(a,$MTL_CODE), equals(b,1) )"
+    3dcalc -a ~/abin/MNIa_caez_mpm_18+tlrc -b ~/abin/MNIa_caez_lr_18+tlrc \
+                    -expr "$R_EXPRESSION" \
+                    -prefix rm.R.$MTL_ANCHOR_NAME.mask
+
+    set BBOX = ` 3dclust  -mni -quiet -1Dformat -nosum -1noneg -inmask -dxyz=1 $RMM $CEXTENT_DIFF rm.R.$MTL_ANCHOR_NAME.mask+tlrc | awk '{print $5 " " $6 " " $7 " " $8 " " $9 " " $10}' `
+    echo R.$MTL_ANCHOR_NAME $BBOX > R.$MTL_ANCHOR_NAME.BBOX.txt
+
+  end
+  cd $RUN_DIR/$WORKS_DIR
+end
+
+  #
+  # Create the L and R PHG masks (from atlas)
+  #
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  cd $ADNI3_PROTOCOL
+  set PHG_ANCHOR_NAME = "PHG"
+  set L_PHG_CODE = 39
+  rm -f rm.L.$PHG_ANCHOR_NAME.mask+tlrc.HEAD rm.L.$PHG_ANCHOR_NAME.mask+tlrc.BRIK.gz rm.L.$PHG_ANCHOR_NAME+tlrc.BRIK
+  set L_EXPRESSION = "equals(a,$L_PHG_CODE)"
+  3dcalc -a ~/abin/MNIa_caez_ml_18+tlrc -expr "$L_EXPRESSION" -prefix rm.L.$PHG_ANCHOR_NAME.mask
+
+  set R_PHG_CODE = 40
+  rm -f rm.R.$PHG_ANCHOR_NAME.mask+tlrc.HEAD rm.R.$PHG_ANCHOR_NAME+tlrc.BRIK.gz rm.R.$PHG_ANCHOR_NAME.mask+tlrc.BRIK
+  set R_EXPRESSION = "equals(a,$R_PHG_CODE)"
+  3dcalc -a ~/abin/MNIa_caez_ml_18+tlrc -expr "$R_EXPRESSION" -prefix rm.R.$PHG_ANCHOR_NAME.mask
+  cd $RUN_DIR/$WORKS_DIR
+end
+
+	#
+	#	Generate the L and R MTL = HPC + PHG masks and bounding boxes.
+	#     Need to bring back in an errts file.
+	#     Create a ref_fanaticor directory and just drop one in there.
+	#
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  cd $ADNI3_PROTOCOL
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set RID = 002_S_0413
+    set IMAGE_ID_MPRAGE = I863056
+    set IMAGE_ID_RSFMRI = I863058
+    set DX = CN
+  else
+    set RID = 002_S_6007
+    set IMAGE_ID_MPRAGE = I1270100
+    set IMAGE_ID_RSFMRI = I1270105
+    set DX = CN
+  endif
+
+  aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/errts.$RID.fanaticor+tlrc.HEAD errts.$RID.fanaticor+tlrc.HEAD
+  aws s3 cp s3://kagfslab/adni3/exp0/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/surf/SUMA/$RID.results/errts.$RID.fanaticor+tlrc.BRIK errts.$RID.fanaticor+tlrc.BRIK
+
+  foreach HEMI ( L R )
+
+    rm -rf $HEMI.MTL.mask+tlrc.HEAD $HEMI.MTL.mask+tlrc.BRIK.gz
+    3dMean -mask_union -prefix $HEMI.MTL.mask rm.$HEMI.HPC_*.mask+tlrc.HEAD rm.$HEMI.PHG.mask+tlrc.HEAD
+
+    rm -rf $HEMI.MTL.dilated.mask+tlrc.HEAD $HEMI.MTL.dilated.mask+tlrc.BRIK.gz
+    3dmask_tool -input $HEMI.MTL.mask+tlrc -prefix $HEMI.MTL.dilated.mask -dilate_input 3 -fill_holes
+
+    rm -rf $HEMI.MTL.mask+rsamp+tlrc.HEAD $HEMI.MTL.mask+rsamp+tlrc.BRIK.gz
+    3dresample -master errts.$RID.fanaticor+tlrc -prefix $HEMI.MTL.mask+rsamp+tlrc -input $HEMI.MTL.dilated.mask+tlrc
+
+    set BBOX = `3dclust -mni -quiet -1Dformat -nosum -1noneg -inmask -dxyz=1 $RMM $CEXTENT_DIFF $HEMI.MTL.mask+rsamp+tlrc | awk '{print $5 " " $6 " " $7 " " $8 " " $9 " " $10}' `
+    echo $HEMI.MTL $BBOX > $HEMI.MTL.BBOX.txt
+
+  end
+  cat *.MTL.BBOX.txt > bbox.mtl.list.txt
+  cd $RUN_DIR/$WORKS_DIR
+end
+
+  #
+  # Create bounding boxes is to work form the group masks
+  # computed from way above, e.g., groupMask.sum.roiMask.R.ACC+tlrc.HEAD.
+  #
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  cd $ADNI3_PROTOCOL
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set RID = 002_S_0413
+    set IMAGE_ID_MPRAGE = I863056
+    set IMAGE_ID_RSFMRI = I863058
+    set DX = CN
+  else
+    set RID = 002_S_6007
+    set IMAGE_ID_MPRAGE = I1270100
+    set IMAGE_ID_RSFMRI = I1270105
+    set DX = CN
+  endif
+  foreach ROI ( ACC AMYG HPC SN THAL )
+    foreach HEMI ( L R )
+    
+      rm -f rm0.$HEMI.$ROI.mask+tlrc.HEAD rm0.$HEMI.$ROI.mask+tlrc.BRIK.gz
+      3dcalc -a groupMask.sum.roiMask.$HEMI.$ROI+tlrc -expr 'ispositive(a-1)' -prefix rm0.$HEMI.$ROI.mask
+    
+      rm -f rm1.$HEMI.$ROI.mask+tlrc.HEAD rm1.$HEMI.$ROI.mask+tlrc.BRIK.gz
+      3dmask_tool -input rm0.$HEMI.$ROI.mask+tlrc -prefix rm1.$HEMI.$ROI.mask -fill_holes
+
+      rm -rf $HEMI.$ROI.mask+rsamp+tlrc.HEAD $HEMI.$ROI.mask+rsamp+tlrc.BRIK.gz
+      3dresample -master errts.$RID.fanaticor+tlrc -prefix $HEMI.$ROI.mask+rsamp+tlrc -input rm1.$HEMI.$ROI.mask+tlrc
+
+      set BBOX = `3dclust -mni -quiet -1Dformat -nosum -1noneg -inmask -dxyz=1 $RMM $CEXTENT_DIFF $HEMI.$ROI.mask+rsamp+tlrc | \
+          awk '{print $5 " " $6 " " $7 " " $8 " " $9 " " $10}' `
+      echo $HEMI.$ROI $BBOX > $HEMI.$ROI.BBOX.txt
+      
+    end
+    cat *.$ROI.BBOX.txt > BBOX.$ROI.LIST.TXT
+  end
+  rm -rf rm0.* rm1.*
+  cd $RUN_DIR/$WORKS_DIR
+  rm -f $ADNI3_PROTOCOL.zip
+  zip -r $ADNI3_PROTOCOL.zip $ADNI3_PROTOCOL
+  aws s3 cp $ADNI3_PROTOCOL.zip s3://kagfslab/loading_dock/$ADNI3_PROTOCOL.zip
+end
+
+	#
+	#	Create a directory to store all of the candidate source ROI seeds.
+	#
+cd $RUN_DIR/$WORKS_DIR
+#rm -rf Masks_basic/ROI.anchor.candidates Masks_adv/ROI.anchor.candidates
+#mkdir Masks_basic/ROI.anchor.candidates Masks_adv/ROI.anchor.candidates
+
+  #
+  # Do the manual R step here.
+  #  Generate a series of candidate anchor ROI seeds using: ADNI.GenGridPoints5_ADNI3.R
+  #
+sudo chmod -R 0777 /adni3/exp0/Masks_basic /adni3/exp0/Masks_adv
+#source( "/home/rstudio/ADNI3/dev-adni3/ADNI.GenGridPoints5.R" )
+
+  #
+	#
+	#		For each candidate ROI seed coordinate determine whether:
+	#			a) a $MTL_EXTENSION (e.g., @ 6mm radius = 33 voxel) mask is achievable;
+	#			b) there is at least $OVERLAP_THRESH voxels of the ROI mask intersecting with global_study_mask
+	#        (alternatively just hard-wire a number - to account for different radius ROIs)
+	#		If (a) and (b) are met, do a one-time generation of the mask for those ROIs that survive.
+	#
+	# Test: set ADNI3_PROTOCOL = "Masks_basic"; set HEMI = "L"; set ANCHOR_REGION = "ACC"; set ROI_NAME = "L.ACC"; set XX = -11; set YY = 20; set ZZ = -16;
+  #
+  #
+set CDT = 3.086
+set CEXTENT_DIFF = 10
+set F_STAT_MIN_CLUSTER_SIZE = $CEXTENT_DIFF
+set MIN_CLUSTER_SIZE = 33
+set OVERLAP_THRESH = 17
+set RMM = 1.01
+set ROI_SRAD = 6
+set ROI_SRAD_5mm = 5
+set ROI_SRAD_6mm = 6
+
+set OVERLAP_THRESH = 27
+
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  cd $ADNI3_PROTOCOL/ROI.anchor.candidates
+  
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set RID = 002_S_0413
+    set IMAGE_ID_MPRAGE = I863056
+    set IMAGE_ID_RSFMRI = I863058
+    set DX = CN
+  else
+    set RID = 002_S_6007
+    set IMAGE_ID_MPRAGE = I1270100
+    set IMAGE_ID_RSFMRI = I1270105
+    set DX = CN
+  endif
+  
+  foreach ANCHOR_REGION ( MTL THAL )
+
+    foreach HEMI ( L R )
+
+      rm -f rm.*
+      rm -f ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.rejected.$ANCHOR_EXTENSION.txt
+      rm -f ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+      cat $HEMI.$ANCHOR_REGION.* > rm.$HEMI.candidateList.CM.txt
+
+      foreach line ( "`cat rm.$HEMI.candidateList.CM.txt`" )
+        set argv = ( $line )
+        set ROI_NAME = $1
+        set XX = $2
+        set YY = $3
+        set ZZ = $4
+        echo
+        echo
+        echo $ROI_NAME $XX $YY $ZZ
+        echo $XX $YY $ZZ > rm.xyz.tmp
+        
+        rm -f rm.$ROI_NAME.roimask+tlrc.HEAD rm.$ROI_NAME.roimask+tlrc.BRIK.gz rm.$ROI_NAME.groupMaskCheck+tlrc.HEAD rm.$ROI_NAME.groupMaskCheck+tlrc.BRIK.gz
+        3dUndump -prefix rm.$ROI_NAME.groupMaskCheck -mask ../global_study_mask+tlrc.HEAD -master ../errts.$RID.fanaticor+tlrc -srad $ROI_SRAD -xyz rm.xyz.tmp
+        
+        set CLUSTER_SIZE = 0
+        set CLUSTER_SIZE = `3dBrickStat -sum rm.$ROI_NAME.groupMaskCheck+tlrc.HEAD`
+        if ( $CLUSTER_SIZE < $MIN_CLUSTER_SIZE ) then
+          echo $ROI_NAME $XX $YY $ZZ >> ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.rejected.$ANCHOR_EXTENSION.txt
+        else
+          rm -rf rm.overlap*
+          3dcalc -a ../$ROI_NAME.mask+rsamp+tlrc -b rm.$ROI_NAME.groupMaskCheck+tlrc -expr 'and(a,b)' -prefix rm.overlap
+          set OVERLAP = `3dBrickStat -sum rm.overlap+tlrc`
+          if( $OVERLAP >= $OVERLAP_THRESH ) then
+            echo $ROI_NAME $XX $YY $ZZ >> ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+            rm -f rm.$ROI_NAME.roimask+tlrc.HEAD rm.$ROI_NAME.mask+tlrc.BRIK.gz rm.$ROI_NAME.groupMaskCheck+tlrc.HEAD rm.$ROI_NAME.groupMaskCheck+tlrc.BRIK.gz
+            rm -f $ROI_NAME.$XX.$YY.$ZZ.mask+trlc.HEAD $ROI_NAME.$XX.$YY.$ZZ.mask+tlrc.BRIK.gz
+            3dUndump -prefix $ROI_NAME.$XX.$YY.$ZZ.mask -mask ../global_study_mask+tlrc.HEAD -master ../errts.$RID.fanaticor+tlrc -srad $ROI_SRAD -xyz rm.xyz.tmp
+          endif
+        endif
+      end
+      
+    end
+    
+    rm -rf L.$ANCHOR_REGION.candidate.source.sum.masks+tlrc.HEAD L.$ANCHOR_REGION.candidate.source.sum.masks+tlrc.BRIK.gz
+    3dMean -sum -prefix L.$ANCHOR_REGION.candidate.source.sum.masks L.$ANCHOR_REGION.*.mask+tlrc.HEAD
+  
+    rm -rf R.$ANCHOR_REGION.candidate.source.sum.masks+tlrc.HEAD R.$ANCHOR_REGION.candidate.source.sum.masks+tlrc.BRIK.gz
+    3dMean -sum -prefix R.$ANCHOR_REGION.candidate.source.sum.masks R.$ANCHOR_REGION.*.mask+tlrc.HEAD
+  
+    rm -rf LR.$ANCHOR_REGION.candidate.source.sum.masks+tlrc.HEAD LR.$ANCHOR_REGION.candidate.source.sum.masks+tlrc.BRIK.gz
+    3dMean -sum -prefix LR.$ANCHOR_REGION.candidate.source.sum.masks *.$ANCHOR_REGION.*.mask+tlrc.HEAD
+  
+  end
+  
+  cd $RUN_DIR/$WORKS_DIR
+
+end
+
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  foreach ANCHOR_REGION ( MTL THAL )
+    foreach HEMI ( L )
+      wc $ADNI3_PROTOCOL/ROI.anchor.candidates/ROICoords.L.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+      wc $ADNI3_PROTOCOL/ROI.anchor.candidates/ROICoords.R.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+    end
+  end
+end
+
+  #
+  # We now have a set of candidate anchor ROIs
+  #   For each subject for each candidate anchor ROI compute the P and Z images
+  #   Set up to run jobs in parallel, e.g., 4 streams from two types of anchor regions and L and R
+  #
+  
+        #
+        # Masks_basic
+        #
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = L
+set ANCHOR_REGION = MTL
+set GLOBAL_MASK_DIR = Masks_basic
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = L
+set ANCHOR_REGION = THAL
+set GLOBAL_MASK_DIR = Masks_basic
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = R
+set ANCHOR_REGION = MTL
+set GLOBAL_MASK_DIR = Masks_basic
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = R
+set ANCHOR_REGION = THAL
+set GLOBAL_MASK_DIR = Masks_basic
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+
+        #
+        # Masks_adv
+        #
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = L
+set ANCHOR_REGION = MTL
+set GLOBAL_MASK_DIR = Masks_adv
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_adv_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = R
+set ANCHOR_REGION = MTL
+set GLOBAL_MASK_DIR = Masks_adv
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_adv_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = L
+set ANCHOR_REGION = THAL
+set GLOBAL_MASK_DIR = Masks_adv
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_adv_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        
+cd $RUN_DIR/$WORKS_DIR
+set HEMI = R
+set ANCHOR_REGION = THAL
+set GLOBAL_MASK_DIR = Masks_adv
+set ROI_MASK_DIR = ROI.anchor.candidates
+set FANATICOR_DIR = Masks
+set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+        set ROI_NAMELIST_FILE = ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+        cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR/$ROI_NAMELIST_FILE | sed -e 's/ /./g' > $GLOBAL_MASK_DIR/$ROI_MASK_DIR/rm.$ROI_NAMELIST_FILE
+        set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+        echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+        tcsh -xef $SCRIPT_DIR/3dTcorr1D_adv_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+
+    #
+    # Confirm that we have the expected numbers of files.
+    #
+cd $RUN_DIR/$WORKS_DIR    
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+    set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+  
+  cd $ADNI3_PROTOCOL/ROI.anchor.candidates
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_ROI_BASE ( MTL THAL )
+
+        rm -f roi_check.$HEMI.$ANCHOR_ROI_BASE.txt
+
+        foreach line ( "`cat $RUN_DIR/$WORKS_DIR/$IMAGE_LIST_FILE`" )
+
+            set argv = ( $line )
+            set RID = $1
+            set IMAGE_ID_MPRAGE = $2
+            set IMAGE_ID_RSFMRI = $3
+            set DX = $4
+            set DXBL = $5
+
+            set res = "`ls | grep "$HEMI.$ANCHOR_ROI_BASE" | grep HEAD | wc -l`"
+
+            echo $RID $res >> roi_check.$HEMI.$ANCHOR_ROI_BASE.txt
+
+        end
+
+        echo -n $HEMI $ANCHOR_ROI_BASE " "
+        cat roi_check.$HEMI.$ANCHOR_ROI_BASE.txt | awk -F' ' '{ print $2 }' | sort | uniq
+        echo
+
+    end
+  end
+  cd $RUN_DIR/$WORKS_DIR 
+end
+
+    #
+    # Reconfirm how many of each dxbl we have
+    #
+cd $RUN_DIR/$WORKS_DIR    
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+    set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+  cat $RUN_DIR/$WORKS_DIR/$IMAGE_LIST_FILE | awk -F' ' '{ print $5 }' | sort | uniq -c
+end
+
+    #
+    # Setup for ANOVA
+    #
+cd $RUN_DIR/$WORKS_DIR  
+foreach ADNI3_PROTOCOL ( Masks_adv  )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+    set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+  
+  cd $ADNI3_PROTOCOL
+
+        #
+        # For 3danova - need to specify the input files
+        #
+  rm -f dset_CN dset_SMC dset_EMCI dset_LMCI
+  foreach line ( "`cat $RUN_DIR/$WORKS_DIR/$IMAGE_LIST_FILE`" )
+
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    set DXBL = $5
+
+    if ( $DXBL == "CN" ) then
+
+      echo "-dset 1 $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/ROI_HERE.PF+tlrc.HEAD" >> dset_CN
+
+    else if ( $DXBL == "SMC" ) then
+
+      echo "-dset 2 $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/ROI_HERE.PF+tlrc.HEAD" >> dset_SMC
+
+    else if ( $DXBL == "EMCI" ) then
+
+      echo "-dset 3 $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/ROI_HERE.PF+tlrc.HEAD" >> dset_EMCI
+
+    else if ( $DXBL == "LMCI" ) then
+
+      echo "-dset 4 $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/ROI_HERE.PF+tlrc.HEAD" >> dset_LMCI
+
+    else
+
+    endif
+
+  end
+  cat dset_CN | sed -e 's?HEAD?HEAD \\?' > rm.dsets
+  cat dset_SMC | sed -e 's?HEAD?HEAD \\?' >> rm.dsets
+  cat dset_EMCI | sed -e 's?HEAD?HEAD \\?' >> rm.dsets
+  cat dset_LMCI | sed -e 's?HEAD?HEAD \\?' >> rm.dsets
+  cd $RUN_DIR/$WORKS_DIR   
+        
+end
+
+  #
+  # Now manually construct the generic 3dANOVA script by integrating the dset texts: batchControl.3dANOVA.Masks_basic
+  #
+
+  #
+  # Ready (finally) to do the ANOVA
+  #
+cd $RUN_DIR/$WORKS_DIR    
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  
+  cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL
+  
+  #rm -rf 3dANOVA;
+  #mkdir 3dANOVA
+  cd 3dANOVA
+
+  foreach HEMI ( L )
+
+    foreach ANCHOR_REGION ( THAL )
+
+      rm -rf $HEMI.$ANCHOR_REGION
+      mkdir $HEMI.$ANCHOR_REGION
+      cd $HEMI.$ANCHOR_REGION
+      
+      rm -rf workarea
+      mkdir workarea
+      cd workarea
+      
+      set ROI_NAMELIST_FILE = $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/ROI.anchor.candidates/ROICoords.$HEMI.$ANCHOR_REGION.candidate.source.$ANCHOR_EXTENSION.txt
+      cat $ROI_NAMELIST_FILE | sed -e 's/ /./g' > $HEMI.$ANCHOR_REGION.roi_name_list_file
+      set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.roi_name_list_file
+      echo $ROI_NAMELIST_FILE $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/global_study_mask+tlrc
+      
+      foreach ROI ( "`cat $ROI_NAMELIST_FILE`" )
+      
+        cp $SCRIPT_DIR/batchControl.3dANOVA.$ADNI3_PROTOCOL batchControl.3dANOVA
+        cat batchControl.3dANOVA | sed -e "s/ROI_HERE/$ROI/" > rm.txt
+        mv rm.txt batchControl.3dANOVA
+        tcsh -xef batchControl.3dANOVA $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/global_study_mask+tlrc |& tee log.batchControl.3dANOVA.$ROI
+
+      end
+      
+      cd ../../
+
+    end
+    
+  end
+  
+  cd $RUN_DIR/$WORKS_DIR
+  
+end
+
+  #######
+  #
+  # Mine the 3dANOVA output files for candidate target ROIs
+  #   This step generates a pool of candidate target ROIs in the form of 3dClusterize reports and masks
+  #
+  #######
+cd $RUN_DIR/$WORKS_DIR    
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+    set CDT = 3.4450
+    set CNUM = 20
+    set ROI_SIZE = 33
+    set ROI_SRAD = 6
+    set CAND_TARGET_CLUSTER_SIZE_MIN_SIZE = 22
+    
+    set ERRTS_RID = 002_S_0413
+    set ERRTS_IMAGE_ID_MPRAGE = I863056
+    set ERRTS_IMAGE_ID_RSFMRI = I863058
+    set ERRTS_DX = CN
+    set ERRTS_PATH = $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/errts.$ERRTS_RID.fanaticor+tlrc.HEAD
+  else
+    set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+    
+    set CDT = 3.4450
+    set CNUM = 20
+    set ROI_SIZE = 33
+    set ROI_SRAD = 6
+    set CAND_TARGET_CLUSTER_SIZE_MIN_SIZE = 22
+    
+    set ERRTS_RID = 002_S_6007
+    set ERRTS_IMAGE_ID_MPRAGE = I1270100
+    set ERRTS_IMAGE_ID_RSFMRI = I1270105
+    set ERRTS_DX = CN
+    set ERRTS_PATH = $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/errts.$ERRTS_RID.fanaticor+tlrc.HEAD  endif
+  endif
+  
+  cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA
+
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_REGION ( THAL )
+
+      cd $HEMI.$ANCHOR_REGION
+
+      rm -rf FStatWorkshop
+      mkdir FStatWorkshop
+      cd FStatWorkshop
+
+      rm -f $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+      rm -f $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.report.txt
+      rm -f $HEMI.$ANCHOR_REGION.rejected.roi.pairs.txt
+      rm -f $HEMI.$ANCHOR_REGION.rejected.roi.pairs.report.txt
+
+      foreach ANCHOR_ROI ( "`head -1 ../workarea/$HEMI.$ANCHOR_REGION.roi_name_list_file`" )
+
+        set ANOVA_FILE = "../$ANCHOR_ROI.3danova+tlrc.HEAD"
+        rm -f rawClust.$ANCHOR_ROI+tlrc.HEAD rawClust.$ANCHOR_ROI+tlrc.BRIK.gz rawClust.$ANCHOR_ROI+tlrc.BRIK rawClust.Report.$ANCHOR_ROI.txt
+        3dClusterize -quiet -nosum -1Dformat -inset $ANOVA_FILE -idat 1 -ithr 1 -NN 1 -clust_nvox $CNUM -1sided RIGHT_TAIL $CDT \
+          -mask $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/global_study_mask+tlrc -pref_map rawClust.$ANCHOR_ROI > rawClust.Report.$ANCHOR_ROI.txt
+
+        if ( -f rawClust.$ANCHOR_ROI+tlrc.HEAD ) then
+          set NUM_CLUSTERS = "`3dinfo -dmax rawClust.$ANCHOR_ROI+tlrc.HEAD`"
+          foreach ICLUSTER ( "` seq 1 $NUM_CLUSTERS `" )
+            rm -f rm.tmp.mask.$ANCHOR_ROI.$ICLUSTER+tlrc.HEAD rm.tmp.mask.$ANCHOR_ROI.$ICLUSTER+tlrc.BRIK.gz
+            3dcalc -a rawClust.$ANCHOR_ROI+tlrc -expr "equals(a,$ICLUSTER)" -prefix rm.tmp.mask.$ANCHOR_ROI.$ICLUSTER
+            set CLUSTER_SIZE = "`3dBrickStat -sum rm.tmp.mask.$ANCHOR_ROI.$ICLUSTER+tlrc.HEAD`"
+            set CLUSTER_WEIGHT = "`3dmaskave -quiet -mask rm.tmp.mask.$ANCHOR_ROI.$ICLUSTER+tlrc.HEAD -sum -mrange 1 1 $ANOVA_FILE'[1]'`"
+            set CLUSTER_VOXEL_AVERAGE_WEIGHT = "`awk -v a=$CLUSTER_WEIGHT -v b=$CLUSTER_SIZE 'BEGIN {print a/b}'`"
+            set CLUST_REPORT = "` head -$ICLUSTER rawClust.Report.$ANCHOR_ROI.txt | tail -1`"
+            echo "** GENERATING T_ROI MASK **"
+            set ROI_CM = ` head -$ICLUSTER rawClust.Report.$ANCHOR_ROI.txt | tail -1 | awk '{ print int($2) "." int($3) "." int($4) }'`
+            set XX = ` echo $ROI_CM | awk -F'.' '{ print int($1) }' `
+            set YY = ` echo $ROI_CM | awk -F'.' '{ print int($2) }' `
+            set ZZ = ` echo $ROI_CM | awk -F'.' '{ print int($3) }' `
+            set X_MNI = "`awk -v x=$XX 'BEGIN {print -1 * int(x)}'`"
+       	    set Y_MNI = "`awk -v y=$YY 'BEGIN {print -1 * int(y)}'`"
+       	    set Z_MNI = "`awk -v z=$ZZ 'BEGIN {print 1 * int(z)}'`"
+            echo $X_MNI $Y_MNI $Z_MNI > rm.xyz.tmp
+            set ANCHOR_TARGET_ROI = "$ANCHOR_ROI.$ICLUSTER.$X_MNI.$Y_MNI.$Z_MNI"
+            rm -f $ANCHOR_TARGET_ROI.mask+tlrc.HEAD $ANCHOR_TARGET_ROI.mask+tlrc.BRIK.gz $ANCHOR_TARGET_ROI.mask+tlrc.BRIK
+            3dUndump -prefix $ANCHOR_TARGET_ROI.mask -mask $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/global_study_mask+tlrc \
+              -master $ERRTS_PATH -srad $ROI_SRAD -xyz rm.xyz.tmp
+            set CAND_TARGET_CLUSTER_SIZE = "`3dBrickStat -sum $ANCHOR_TARGET_ROI.mask+tlrc.HEAD`"
+            if ( $CAND_TARGET_CLUSTER_SIZE >= $CAND_TARGET_CLUSTER_SIZE_MIN_SIZE ) then
+              echo $ANCHOR_TARGET_ROI >> $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+              echo $ANCHOR_TARGET_ROI $CLUSTER_SIZE $CAND_TARGET_CLUSTER_SIZE $CLUSTER_WEIGHT $CLUSTER_VOXEL_AVERAGE_WEIGHT \
+                $CLUST_REPORT >> $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.report.txt
+            else
+              echo $ANCHOR_TARGET_ROI >> $HEMI.$ANCHOR_REGION.rejected.roi.pairs.txt
+              echo $ANCHOR_TARGET_ROI $CLUSTER_SIZE $CAND_TARGET_CLUSTER_SIZE $CLUSTER_WEIGHT $CLUSTER_VOXEL_AVERAGE_WEIGHT \
+                $CLUST_REPORT >> $HEMI.$ANCHOR_REGION.rejected.roi.pairs.report.txt
+            endif
+          end
+        endif
+      end
+      set TARGET_MASK_LIST = "`ls rawClust.$HEMI.$ANCHOR_REGION.*+tlrc.HEAD`"
+      rm -f target.mask.$HEMI.$ANCHOR_REGION+tlrc.HEAD target.mask.$HEMI.$ANCHOR_REGION+tlrc.BRIK.gz target.mask.$HEMI.$ANCHOR_REGION+tlrc.BRIK
+      3dMean -count -prefix target.mask.$HEMI.$ANCHOR_REGION $TARGET_MASK_LIST
+      cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA
+    end
+  end
+end
+rm -rf TargetMasks
+mkdir TargetMasks
+cp */FStatWorkshop/target.mask.* TargetMasks
+
+  #
+  # Summarize results of the search for ROI Anchor-Target Pairs
+  #
+cd $RUN_DIR/$WORKS_DIR    
+foreach ADNI3_PROTOCOL ( Masks_adv )
+  
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_REGION ( THAL )
+
+        cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop
+
+        cat $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.report.txt | awk -F' ' '{ print $1 }' | \
+            awk -F'.' '{print $1 "." $2 "." $3 "." $4 "." $5}' | sort | uniq > \
+            $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.unique.anchors.txt
+
+        set MASK_LIST = ""
+        set MASK_LIST = `cat $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt | sed -e 's/$/.mask+tlrc/'`
+
+        rm -f $HEMI.$ANCHOR_REGION.target.count.mask+tlrc.HEAD $HEMI.$ANCHOR_REGION.target.count.mask+tlrc.BRIK \
+              $HEMI.$ANCHOR_REGION.target.count.mask+tlrc.BRIK.gz
+        3dMean -count -prefix $HEMI.$ANCHOR_REGION.target.count.mask $MASK_LIST
+
+        wc $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.report.txt
+        cat $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.report.txt | awk -F' ' '{ print $1 }' | \
+            awk -F'.' '{print $7 " " $8 " " $9 }' | sort | uniq > \
+            $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.unique.targets.txt
+
+        wc $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.report.txt
+        wc $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.unique.anchors.txt
+        wc $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.unique.targets.txt
+
+    end
+  end
+end
+
+  #
+  # Generate a mask comprised of the sum of all the confirmed target ROI masks
+  #   This is a key visualization check that we're getting target ROIs in reasonable places.
+  #
+cd $RUN_DIR/$WORKS_DIR    
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_REGION ( THAL )
+
+        cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop
+
+        set MASK_LIST = ""
+        set MASK_LIST = `cat $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt | sed -e 's/$/.mask+tlrc/'`
+
+        rm -f $HEMI.$ANCHOR_REGION.confirmed.target.mask+tlrc.HEAD $HEMI.$ANCHOR_REGION.confirmed.target.mask+tlrc.BRIK \
+              $HEMI.$ANCHOR_REGION.confirmed.target.mask.BRIK.gz
+        3dMean -count -prefix $HEMI.$ANCHOR_REGION.confirmed.target.mask $MASK_LIST
+
+        cp $HEMI.$ANCHOR_REGION.confirmed.target.mask* $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/TargetMasks/.
+
+    end
+  end
+end
+
+  #
+  # Generate the time series for the confirmed target ROIs.
+  #   (We already have the source masks and time series from above.)
+  #
+cd $RUN_DIR/$WORKS_DIR    
+set HEMI = L
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( THAL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_adv_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+cd $RUN_DIR/$WORKS_DIR    
+set HEMI = R
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( THAL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_adv_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+cd $RUN_DIR/$WORKS_DIR    
+set HEMI = L
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( THAL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+cd $RUN_DIR/$WORKS_DIR    
+set HEMI = R
+foreach ADNI3_PROTOCOL ( Masks_adv )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( THAL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+  #
+  # Do the ROI Pairs Analysis: roi_pairs_analysis_adni3.Rmd
+  #
+  # HINT: Clear the *Rdat from $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL
+  # Setup
+  #
+cd $RUN_DIR/$WORKS_DIR 
+foreach ADNI3_PROTOCOL ( Masks_basic )
+  foreach HEMI ( L R )
+    foreach ANCHOR_REGION ( MTL THAL )
+      foreach FDR ( q0.01 q0.005 )
+        rm -rf $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR
+        mkdir $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR
+        sudo chmod -R 0777 $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR
+        cp $SCRIPT_DIR/roi_pairs_analysis_adni3.Rmd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/.
+        cp $SCRIPT_DIR/roi_pairs_analysis_helper_functions.R $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/.
+      end
+    end
+  end
+end
+
+  #
+  # Create the df_target and df_anchor timeseries files.
+  # This step has the added value of checking for all-zero timeCourse files.
+  #   How these happen - not yet 100% sure.  The subjects for whom this happens could
+  #   be suspect.  After obtaining the "missing" - for now - manually remove from lists.
+  #
+  # Test: set ADNI3_PROTOCL = "Masks_basic"; set HEMI = "L"; set ANCHOR_REGION = "MTL"
+cd $RUN_DIR/$WORKS_DIR 
+foreach ADNI3_PROTOCOL ( Masks_basic )
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+    set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+  else
+    set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+  endif
+  foreach HEMI ( R )
+    foreach ANCHOR_REGION ( MTL )
+    
+      cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop
+      rm -f $HEMI.$ANCHOR_REGION.anchors.ts.txt $HEMI.$ANCHOR_REGION.anchors.found.ts.txt $HEMI.$ANCHOR_REGION.anchors.missing.ts.txt
+      rm -f $HEMI.$ANCHOR_REGION.targets.ts.txt $HEMI.$ANCHOR_REGION.targets.found.ts.txt $HEMI.$ANCHOR_REGION.targets.missing.ts.txt
+      
+      foreach line ( "`cat $RUN_DIR/$WORKS_DIR/$IMAGE_LIST_FILE`" )
+
+        set argv = ( $line )
+        set RID = $1
+        set IMAGE_ID_MPRAGE = $2
+        set IMAGE_ID_RSFMRI = $3
+        set DX = $4
+        set DXBL = $5
+        
+        foreach line ( "`cat $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.unique.anchors.txt`" )
+        
+          set argv = ( $line )
+          set ROI = $1
+          echo $RID $DX $DXBL $ROI | sed -e 's/  / /g' -e 's/ /,/g' -e 's/$/,/' > rm.anchors.txt
+          
+          set TS_FNAME = $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/timeCourse.$ROI.txt
+          if ( -f $TS_FNAME ) then
+            cat rm.anchors.txt >> $HEMI.$ANCHOR_REGION.anchors.found.ts.txt
+            cat $TS_FNAME | tr '\n' ',' > rm.txt
+            paste -d' ' rm.anchors.txt rm.txt | sed -e 's/ //g' >> $HEMI.$ANCHOR_REGION.anchors.ts.txt
+          else
+            cat rm.anchors.txt >> $HEMI.$ANCHOR_REGION.anchors.missing.ts.txt
+          endif
+          
+        end
+        
+        foreach line ( "`cat $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt`" )
+                
+          set argv = ( $line )
+          set ROI = $1
+          echo $RID $DX $DXBL $ROI | sed -e 's/  / /g' -e 's/ /,/g' -e 's/$/,/' > rm.targets.txt
+          
+          set TS_FNAME = $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX/timeCourse.$ROI.txt
+          if ( -f $TS_FNAME ) then
+            cat rm.targets.txt >> $HEMI.$ANCHOR_REGION.targets.found.ts.txt
+            cat $TS_FNAME | tr '\n' ',' > rm.txt
+            paste -d' ' rm.anchors.txt rm.txt | sed -e 's/ //g' >> $HEMI.$ANCHOR_REGION.targets.ts.txt
+          else
+            cat rm.targets.txt >> $HEMI.$ANCHOR_REGION.targets.missing.ts.txt
+          endif
+          
+        end
+        
+      end
+      
+    end
+  end
+end
+  
+  #
+  # Manually run roi_pairs_analysis_adni3.Rmd
+  #
+  
+  #
+  #     Build some mask files to drive publication figures
+  #     Amongst the outputs in dev-adni3 will be files listing the anchor and target rois.
+  #       Example name: L.MTL.fdr_anova_sig_anchor_rois.txt.  Place it into: $ROI_MASK_DIR/3dANOVA/PubFigs
+  #
+  # Test: set ADNI3_PROTOCOL = "Masks_basic"; set HEMI = L; set ANCHOR_REGION = MTL; set FDR = q0.01
+cd $RUN_DIR/$WORKS_DIR 
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA
+  
+  if ( -d PubFigs ) then
+    cd PubFigs
+  else
+    mkdir PubFigs
+    cd PubFigs
+  endif
+  
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_REGION ( MTL THAL )
+    
+      foreach FDR ( q0.01 q0.005 )
+
+        cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/PubFigs
+        
+        rm -rf $HEMI.$ANCHOR_REGION.$FDR
+        mkdir $HEMI.$ANCHOR_REGION.$FDR
+        cd $HEMI.$ANCHOR_REGION.$FDR
+
+        cat $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/$HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois.txt | \
+          sort | uniq | sed -e 's/$/.mask+tlrc.HEAD/' -e "s?^?$RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/ROI.anchor.candidates/?" > rm.txt
+        set MASK_GROUP_LIST = "`cat rm.txt`"
+
+        rm -f $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois_sum+tlrc.HEAD $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois_sum+tlrc.BRIK.gz
+        3dMean -sum -prefix $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois_sum $MASK_GROUP_LIST
+
+        rm -f $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois_union+tlrc.HEAD $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois_union+tlrc.BRIK.gz
+        3dMean -mask_union -prefix $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois_union $MASK_GROUP_LIST
+        
+        cat $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/$HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois.txt | \
+          sort | uniq | sed -e 's/$/.mask+tlrc.HEAD/' -e "s?^?$RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/?" > rm.txt
+        set MASK_GROUP_LIST = "`cat rm.txt`"
+
+        rm -f $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois_sum+tlrc.HEAD $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois_sum+tlrc.BRIK.gz
+        3dMean -sum -prefix $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois_sum $MASK_GROUP_LIST
+
+        rm -f $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois_union+tlrc.HEAD $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois_union+tlrc.BRIK.gz
+        3dMean -mask_union -prefix $HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois_union $MASK_GROUP_LIST
+
+      end
+      
+    end
+
+  end
+  
+end
+
+  #
+  # Do the whereami
+  #
+cd $RUN_DIR/$WORKS_DIR 
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_REGION ( MTL THAL )
+    
+      foreach FDR ( q0.01 q0.005 )
+  
+        cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/PubFigs/$HEMI.$ANCHOR_REGION.$FDR
+        
+        cat $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/$HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_anchor_rois.txt | sort | uniq > rm.txt
+        rm -f $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+        foreach ROI_PAIR ( "`cat rm.txt`" )
+
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "START: " $ROI_PAIR >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+
+            set XX_MTL_MNI = ` echo $ROI_PAIR | awk -F'.' '{ print int($3) }' `
+            set YY_MTL_MNI = ` echo $ROI_PAIR | awk -F'.' '{ print int($4) }' `
+            set ZZ_MTL_MNI = ` echo $ROI_PAIR | awk -F'.' '{ print int($5) }' `
+
+            set X = "`awk -v x=$XX_MTL_MNI 'BEGIN {print -1 * int(x)}'`"
+            set Y = "`awk -v y=$YY_MTL_MNI 'BEGIN {print -1 * int(y)}'`"
+            set Z = "`awk -v z=$ZZ_MTL_MNI 'BEGIN {print 1 * int(z)}'`"
+
+            whereami $X $Y $Z >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "END: " $ROI_PAIR >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+            echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.anchors.txt
+
+        end
+
+        cat $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/$HEMI.$ANCHOR_REGION.fdr_perm_anova_sig_target_rois.txt | sort | uniq > rm.txt
+        rm -f $HEMI.$ANCHOR_REGION.whereami.targets.txt
+        foreach ROI_PAIR ( "`cat rm.txt`" )
+        
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "START: " $ROI_PAIR >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+
+          set XX_BRAIN_MNI = ` echo $ROI_PAIR | awk -F'.' '{ print int($7) }' `
+          set YY_BRAIN_MNI = ` echo $ROI_PAIR | awk -F'.' '{ print int($8) }' `
+          set ZZ_BRAIN_MNI = ` echo $ROI_PAIR | awk -F'.' '{ print int($9) }' `
+
+          set X = "`awk -v x=$XX_BRAIN_MNI 'BEGIN {print -1 * int(x)}'`"
+          set Y = "`awk -v y=$YY_BRAIN_MNI 'BEGIN {print -1 * int(y)}'`"
+          set Z = "`awk -v z=$ZZ_BRAIN_MNI 'BEGIN {print 1 * int(z)}'`"
+
+          whereami $X $Y $Z >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "END: " $ROI_PAIR >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+          echo "**************************" >> $HEMI.$ANCHOR_REGION.whereami.targets.txt
+
+        end
+        
+      end
+
+    end
+    
+  end
+
+end
+
+  #
+  # Generate images for the significant paired t-tests
+  #
+cd $RUN_DIR/$WORKS_DIR
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL
+
+  foreach HEMI ( L R )
+
+    foreach ANCHOR_REGION ( MTL THAL )
+    
+      foreach FDR ( q0.01 q0.005 )
+    
+        foreach PAIR ( smc_cn emci_cn lmci_cn emci_smc lmci_smc lmci_emci )
+        
+          cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/ROI.anchor.candidates
+
+          cat $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/$HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois.txt | sed 's/$/.mask+tlrc.HEAD/' > rm.txt
+          set MASK_GROUP_LIST = "`cat rm.txt`"
+
+          rm -f $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_sum+tlrc.HEAD $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_sum+tlrc.BRIK.gz
+          3dMean -sum -prefix $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_sum $MASK_GROUP_LIST
+          cp $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_sum+tlrc.* $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/PubFigs/$HEMI.$ANCHOR_REGION.$FDR/.
+
+          rm -f $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_union+tlrc.HEAD $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_union+tlrc.BRIK.gz
+          3dMean -mask_union -prefix $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_union $MASK_GROUP_LIST
+          cp $HEMI.$ANCHOR_REGION.$PAIR.sig_anchor_rois_union+tlrc.* $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/PubFigs/$HEMI.$ANCHOR_REGION.$FDR/.
+
+          cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop
+
+          cat $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/$FDR/$HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois.txt | sed 's/$/.mask+tlrc.HEAD/' > rm.txt
+          set MASK_GROUP_LIST = "`cat rm.txt`"
+          rm -f $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_sum+tlrc.HEAD $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_sum+tlrc.BRIK.gz
+          3dMean -sum -prefix $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_sum $MASK_GROUP_LIST
+          cp $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_sum+tlrc.* $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/PubFigs/$HEMI.$ANCHOR_REGION.$FDR/.
+
+          rm -f $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_union+tlrc.HEAD \
+                $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_union+tlrc.BRIK.gz
+          3dMean -mask_union -prefix $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_union $MASK_GROUP_LIST
+          cp $HEMI.$ANCHOR_REGION.$PAIR.sig_target_rois_union+tlrc.* $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/PubFigs/$HEMI.$ANCHOR_REGION.$FDR/.
+        
+        end
+          
+      end
+        
+    end
+
+  end
+  
+  cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA
+  rm -f $ADNI3_PROTOCOL.PubFigs.zip
+  zip -r $ADNI3_PROTOCOL.PubFigs.zip PubFigs
+  aws s3 cp $ADNI3_PROTOCOL.PubFigs.zip s3://kagfslab/loading_dock/$ADNI3_PROTOCOL.PubFigs.zip
+  
+end
+
+
+#
+# DONE
+#
+
+#
+# SPECIAL ONE-TIME UTILITIES
+#
+
+
+#
+# Some specialized clean-up utilities aimed an optimizing storage.
+# (Realized late in the game that 3dTcorr1D_Driver wasn't compressing the BRIK files.)
+#
+cd $RUN_DIR/$WORKS_DIR 
+set ADNI3_PROTOCOL = "Masks_basic"
+set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+foreach line ( "`cat $RUN_DIR/$WORKS_DIR/$IMAGE_LIST_FILE`" )
+    set argv = ( $line )
+    set RID = $1
+    set IMAGE_ID_MPRAGE = $2
+    set IMAGE_ID_RSFMRI = $3
+    set DX = $4
+    set DXBL = $5
+    cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/$RID.$IMAGE_ID_MPRAGE.$IMAGE_ID_RSFMRI.$DX
+    chmod a-st *L.MTL*BRIK *R.MTL*BRIK
+    gzip -f *L.MTL*BRIK
+    gzip -f *R.MTL*BRIK
+end
+
+#
+# On 17-Jan, we observed that some L.MTL and R.MTL targets not found.
+#   Solution: 
+#   1. Get list of RID
+#   2. Create a "make-up list".
+#   3. Manually run.
+#  Test: set ADNI3_PROTOCOL = Masks_basic; set HEMI = L; set ANCHOR_REGION = MTL
+cd $RUN_DIR/$WORKS_DIR 
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_basic_18Jan2022_catch_up_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_adv_18Jan2022_catch_up_id_list.csv
+  endif
+  
+  foreach HEMI ( L )
+
+    foreach ANCHOR_REGION ( MTL )
+    
+      cd $RUN_DIR/$WORKS_DIR/$ADNI3_PROTOCOL/3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop
+      cat $HEMI.$ANCHOR_REGION.targets.missing.ts.txt | awk -F',' '{print $1}' | sort | uniq > rm.txt
+      rm -f $RUN_DIR/$WORKS_DIR/$CATCH_UP_IMAGE_LIST_FILE
+      foreach line ( "`cat rm.txt`" )
+        set argv = ( $line )
+        set RID = $1
+        cat $RUN_DIR/$WORKS_DIR/$IMAGE_LIST_FILE | grep $RID >> $RUN_DIR/$WORKS_DIR/$CATCH_UP_IMAGE_LIST_FILE
+      end
+    
+    end
+    
+  end
+  
+end
+
+    # Do the catch-up runs.
+
+cd $RUN_DIR/$WORKS_DIR  
+set HEMI = R
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_basic_a_18Jan2022_catch_up_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_adv_18Jan2022_catch_up_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( MTL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $CATCH_UP_IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    rm -f $ADNI3_PROTOCOL/$ROI_MASK_DIR/failed.checksum.confirmed.roi.pairs.txt
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $CATCH_UP_IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+cd $RUN_DIR/$WORKS_DIR    
+set HEMI = R
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_basic_b_18Jan2022_catch_up_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_adv_18Jan2022_catch_up_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( MTL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $CATCH_UP_IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $CATCH_UP_IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+
+
+#
+# Very Special Clean-up.  Chasing some stragglers.
+#
+cd /adni3/exp0/Masks_basic/3dANOVA/R.MTL/FStatWorkshop
+cat R.MTL.confirmed.roi.pairs.txt | grep R.MTL.20.3.-25.2.47.-27.3 > R.MTL.confirmed.roi.pairs.explore.txt
+
+cd $RUN_DIR/$WORKS_DIR  
+set HEMI = R
+foreach ADNI3_PROTOCOL ( Masks_basic )
+
+  if ( $ADNI3_PROTOCOL == "Masks_basic" ) then
+      set IMAGE_LIST_FILE = df_go_basic_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_basic_a_18Jan2022_catch_up_id_list.csv
+  else
+      set IMAGE_LIST_FILE = df_go_adv_21Dec2021_id_list.csv
+      set CATCH_UP_IMAGE_LIST_FILE = df_go_adv_18Jan2022_catch_up_id_list.csv
+  endif
+
+  foreach ANCHOR_REGION ( MTL )
+    
+    cd $RUN_DIR/$WORKS_DIR
+    set GLOBAL_MASK_DIR = $ADNI3_PROTOCOL
+    set ROI_MASK_DIR = 3dANOVA/$HEMI.$ANCHOR_REGION/FStatWorkshop/
+    set FANATICOR_DIR = Masks
+    set ROI_NAMELIST_FILE = $HEMI.$ANCHOR_REGION.confirmed.roi.pairs.explore.txt
+    cat $GLOBAL_MASK_DIR/$ROI_MASK_DIR//$ROI_NAMELIST_FILE | sed -e 's/ /./g' > \
+        $GLOBAL_MASK_DIR/$ROI_MASK_DIR//rm.$ROI_NAMELIST_FILE
+    set ROI_NAMELIST_FILE = rm.$ROI_NAMELIST_FILE
+    echo $RUN_DIR $WORKS_DIR $CATCH_UP_IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+    rm -f $ADNI3_PROTOCOL/$ROI_MASK_DIR/failed.checksum.confirmed.roi.pairs.txt
+    tcsh -xef $SCRIPT_DIR/3dTcorr1D_Driver $RUN_DIR $WORKS_DIR $CATCH_UP_IMAGE_LIST_FILE $ROI_NAMELIST_FILE $GLOBAL_MASK_DIR $ROI_MASK_DIR $FANATICOR_DIR
+      
+  end
+end
+
+
