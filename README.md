@@ -15,4 +15,4 @@ The 2022 study.
 * See the reports folder for results including AAIC abstracts and posters. This folder also contains RMarkdown reports for individual analysis.
 * See the src folder for sample R Code and shell scripts needed to execute the complex workflow.  The workflow involved FreeSurfer, AFNI, and home-grown ANOVA code.
 
-Skills applied: Shell Programming, Python, PyTorch, CNN, CUDA/GPU, AWS, Visual Studio Code, GitHub Co-Pilot, AFNI, ADNI, FreeSurfer, Statistical Inference (ANOVA), High-dimensional time series.
+Skills applied: R, Shell Programming, Python, PyTorch, CNN, CUDA/GPU, AWS, Visual Studio Code, GitHub Co-Pilot, AFNI, ADNI, FreeSurfer, Statistical Inference (ANOVA), High-dimensional time series.
