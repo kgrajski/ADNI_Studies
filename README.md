@@ -3,6 +3,8 @@ ADNI Multi-Modal MRI and rsfMRI Summary Results and Miscellaneous Shell Scripts 
 
 See: https://adni.loni.usc.edu/data-samples/adni-data/neuroimaging/mri/
 
+See: https://www.sciencedirect.com/science/article/pii/S2213158219302104?via%3Dihub
+
 The 2019 study.
 * Using the ADNi2 cohort, showed that changes in rsfMRI occurred prior to changes in MRI characteristic of the progression CN to MCI to AD.
 * See the reports folder for results including journal article.
